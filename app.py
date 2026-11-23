@@ -1,24 +1,25 @@
 """Interfaz local en español; los documentos nunca se suben a internet."""
 import os
 import sys
-import webbrowser
 import json
 from pathlib import Path
 import queue
 import re
 import shutil
+import subprocess
 import threading
 import tempfile
 import tkinter as tk
+import zipfile
 from tkinter import filedialog, messagebox, ttk
 
-from anonimizador import analyze, apply_review, read_recovery, restore
+from anonimizador import AnonymizationError, MAX_BYTES, analyze, apply_review, read_recovery, restore
 from restauracion_campos import restore_judgment
 from revision import ReviewWindow
 from estilo import configurar_estilos
 from estilo_casillas import configurar_casillas
 from procesamiento import ProcessingCancelled, cancellation_scope, check_cancelled
-from actualizacion import installed_version, update_direct
+from actualizacion import compare_release, download_installer, installed_version
 
 
 BASE_FOLDER = (Path.home() / 'Documents' / 'EnigmaLex' if getattr(sys, 'frozen', False)
@@ -76,6 +77,8 @@ class App(tk.Tk):
         self.minsize(720, 660)
         self.state('zoomed')
         self.files = []
+        self.archive_workspace = None
+        self.archive_files = {}
         self.events = queue.Queue()
         self.busy = False
         self.cancel_event = threading.Event()
@@ -104,7 +107,12 @@ class App(tk.Tk):
         modes.pack(fill='x')
         for value, label in [('anonimizar', 'Anonimizar archivos'), ('fallo', 'Restaurar archivos anonimizados')]:
             ttk.Radiobutton(modes, text=label, variable=self.mode, value=value).pack(side='left', padx=(0, 24))
-        ttk.Button(modes, text='Instalar nueva versión', command=self.install_new_version).pack(side='right')
+        self.version_button = ttk.Button(modes, text='Actualización pendiente',
+                                         command=self.offer_update, state='disabled')
+        self.version_button.pack(side='right')
+        self.available_update = None
+        self.installing_update = False
+        self.after_idle(self.check_for_updates)
         ttk.Button(modes, text='Configurar carpetas…', command=self.configurar_carpetas).pack(side='right', padx=8)
         document_area = ttk.Frame(frame)
         document_area.pack(fill='x')
@@ -266,36 +274,96 @@ class App(tk.Tk):
                 messagebox.showerror('Guardar copia', str(exc))
 
     def close(self):
-        if self.busy:
+        if self.installing_update:
+            messagebox.showinfo('Actualizaciones', 'Espere a que termine la descarga.', parent=self)
+        elif self.busy:
             self.cancel_processing()
         else:
+            self.clear()
             self.destroy()
 
-    def install_new_version(self):
+    def check_for_updates(self):
+        if self.installing_update:
+            self.after(300_000, self.check_for_updates)
+            return
+        installed = installed_version(Path(__file__).resolve().parent)
+
+        def show_result(release, error):
+            self.available_update = None
+            if release and release.newer and release.installer_url and getattr(sys, 'frozen', False):
+                self.available_update = release
+            enabled = self.available_update is not None and not self.installing_update
+            self.version_button.configure(state='normal' if enabled else 'disabled')
+            self.after(60_000 if error else 300_000, self.check_for_updates)
+
+        self.run_update_task(lambda: compare_release(installed), show_result)
+
+    def offer_update(self):
+        release = self.available_update
+        if release is None or self.installing_update:
+            return
+        installed = installed_version(Path(__file__).resolve().parent)
+        details = f'Versión instalada: {installed}\nNueva versión: {release.version}\n\n'
         if self.busy:
-            messagebox.showinfo('Actualización', 'Espere a que termine el proceso actual.')
+            messagebox.showinfo('Actualización pendiente', details +
+                                'Espere a que termine el proceso actual.', parent=self)
             return
-        if getattr(sys, 'frozen', False):
-            webbrowser.open('https://github.com/Telecampux/EnigmaLex/releases/latest')
-            self.status.set('Descargue el instalador de la versión más reciente desde GitHub.')
-            return
-        self.status.set('Comprobando si hay una nueva versión…')
-        self.update_idletasks()
-        try:
-            installed = update_direct(
-                Path(__file__).resolve().parent,
-                confirm=lambda current, available: messagebox.askyesno(
-                    'Instalar nueva versión',
-                    f'Versión instalada: {current}\nVersión disponible: {available}\n\n¿Desea instalarla?'))
-        except Exception as error:
-            messagebox.showerror('Actualización', str(error))
-            self.status.set('No se pudo completar la actualización.')
-            return
-        if not installed:
-            self.status.set('Actualización cancelada.')
-            return
-        messagebox.showinfo('Actualización', 'Nueva versión instalada. Abra de nuevo el Anonimizador.')
-        self.destroy()
+        if messagebox.askyesno('Actualización pendiente', details +
+                               '¿Desea instalar la nueva versión?\n'
+                               'EnigmaLex se cerrará al abrir el instalador.', parent=self):
+            self.install_update(release)
+
+    def run_update_task(self, task, on_result):
+        results = queue.Queue()
+
+        def run():
+            try:
+                results.put((task(), None))
+            except (OSError, ValueError) as error:
+                results.put((None, error))
+
+        def poll_result():
+            try:
+                result, error = results.get_nowait()
+            except queue.Empty:
+                self.after(100, poll_result)
+                return
+            on_result(result, error)
+
+        threading.Thread(target=run, daemon=True).start()
+        self.after(100, poll_result)
+
+    def install_update(self, release):
+        self.installing_update = True
+        self.version_button.configure(state='disabled', text='Descargando actualización…')
+
+        def fetch():
+            folder = Path(tempfile.mkdtemp(prefix='EnigmaLex-'))
+            try:
+                return download_installer(release, folder)
+            except (OSError, ValueError):
+                shutil.rmtree(folder, ignore_errors=True)
+                raise
+
+        def open_installer(installer, error):
+            if error is None:
+                try:
+                    if self.busy:
+                        raise ValueError('Espere a que termine el proceso actual y vuelva a intentarlo.')
+                    destination = Path(sys.executable).resolve().parent
+                    subprocess.Popen([str(installer), f'/DIR={destination}'], cwd=installer.parent)
+                except (OSError, ValueError) as failure:
+                    shutil.rmtree(installer.parent, ignore_errors=True)
+                    error = failure
+            if error is None:
+                self.destroy()
+                return
+            self.installing_update = False
+            self.version_button.configure(
+                state='normal' if self.available_update else 'disabled', text='Actualización pendiente')
+            messagebox.showerror('Actualizaciones', f'No se pudo abrir el instalador.\n\n{error}', parent=self)
+
+        self.run_update_task(fetch, open_installer)
 
     def cancel_processing(self):
         if self.busy:
@@ -387,14 +455,106 @@ class App(tk.Tk):
         if self.mode.get() == 'fallo':
             self.load_downloaded_judgment()
             return
-        if not self.folders['originales'].is_dir():
-            messagebox.showerror('Carpeta de originales', 'La carpeta configurada no existe o no está conectada. Abra Configurar carpetas.')
-            return
-        files = filedialog.askopenfilenames(title='Seleccione los archivos originales para anonimizar', initialdir=str(self.folders['originales']))
+        originals = self.folders['originales']
+        files = filedialog.askopenfilenames(
+            parent=self,
+            title='Abra la carpeta y seleccione los archivos originales para anonimizar',
+            initialdir=str(originals if originals.is_dir() else Path.home()),
+            filetypes=[('Todos los archivos', '*')])
         for file in files:
-            if file not in self.files:
-                self.files.append(file)
-                self.listing.insert('end', file)
+            if Path(file).suffix.lower() == '.zip':
+                self.choose_archive_members(Path(file))
+            else:
+                self.add_original(file)
+
+    def add_original(self, file, label=None):
+        if file not in self.files:
+            self.files.append(file)
+            self.listing.insert('end', label or file)
+
+    def choose_archive_members(self, path):
+        try:
+            with zipfile.ZipFile(path) as archive:
+                members = [entry for entry in archive.infolist() if not entry.is_dir()]
+                if not members:
+                    messagebox.showinfo('Archivo ZIP', 'El archivo comprimido está vacío.', parent=self)
+                    return
+                selection = self.show_archive_members(path, members)
+                if selection is None:
+                    self.add_original(str(path))
+                    return
+                pending = [index for index in selection if (path, index) not in self.archive_files]
+                if any(members[index].file_size > MAX_BYTES for index in pending):
+                    raise AnonymizationError('El límite por documento es 100 MB.')
+                if sum(members[index].file_size for index in pending) > 3 * MAX_BYTES:
+                    raise AnonymizationError('Seleccione hasta 300 MB de documentos por vez.')
+                if pending and self.archive_workspace is None:
+                    self.archive_workspace = tempfile.TemporaryDirectory(prefix='EnigmaLex-')
+                for index in pending:
+                    entry = members[index]
+                    # Keep only the basename and write into our own temporary directory.
+                    name = entry.filename.replace(chr(92), '/').rsplit('/', 1)[-1]
+                    name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', '_', name).strip().rstrip('. ')
+                    if not name:
+                        name = f'documento_{index + 1}'
+                    if re.fullmatch(r'(?i)(CON|PRN|AUX|NUL|COM[0-9¹²³]|LPT[0-9¹²³])', name.split('.')[0]):
+                        name = '_' + name
+                    with archive.open(entry) as source:
+                        data = source.read(MAX_BYTES + 1)
+                    if len(data) > MAX_BYTES:
+                        raise AnonymizationError('El límite por documento es 100 MB.')
+                    folder = Path(tempfile.mkdtemp(dir=self.archive_workspace.name))
+                    target = folder / name
+                    target.write_bytes(data)
+                    self.archive_files[(path, index)] = target
+                    self.add_original(str(target), f'{path.name}  ›  {entry.filename}')
+        except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile, AnonymizationError) as error:
+            messagebox.showerror('Archivo ZIP', f'No se pudo cargar el documento del ZIP.\n{error}', parent=self)
+
+    def show_archive_members(self, path, members):
+        window = tk.Toplevel(self)
+        window.title(path.name)
+        window.transient(self)
+        panel = ttk.Frame(window, padding=14)
+        panel.pack(fill='both', expand=True)
+        ttk.Label(panel, text='Seleccione los documentos que desea cargar.').pack(anchor='w', pady=(0, 8))
+        contents = ttk.Frame(panel)
+        contents.pack(fill='both', expand=True)
+        contents.rowconfigure(0, weight=1)
+        contents.columnconfigure(0, weight=1)
+        listing = tk.Listbox(contents, selectmode='extended', width=70, height=14)
+        listing.grid(row=0, column=0, sticky='nsew')
+        vertical = ttk.Scrollbar(contents, command=listing.yview)
+        vertical.grid(row=0, column=1, sticky='ns')
+        horizontal = ttk.Scrollbar(contents, orient='horizontal', command=listing.xview)
+        horizontal.grid(row=1, column=0, sticky='ew')
+        listing.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        for entry in members:
+            listing.insert('end', entry.filename)
+        buttons = ttk.Frame(panel)
+        buttons.pack(fill='x', pady=(10, 0))
+        selection = ()
+
+        def finish(selected):
+            nonlocal selection
+            selection = selected
+            window.destroy()
+
+        def load_selected(event=None):
+            if listing.curselection():
+                finish(listing.curselection())
+
+        ttk.Button(buttons, text='Cancelar', command=window.destroy).pack(side='right')
+        ttk.Button(buttons, text='Cargar selección', command=load_selected).pack(side='right', padx=6)
+        ttk.Button(buttons, text='Cargar ZIP completo', command=lambda: finish(None)).pack(side='left')
+        listing.bind('<Double-Button-1>', load_selected)
+        listing.bind('<Return>', load_selected)
+        window.bind('<Escape>', lambda event: window.destroy())
+        window.wait_visibility()
+        window.grab_set()
+        listing.focus_set()
+        self.wait_window(window)
+        return selection
 
     def load_downloaded_judgment(self):
         """Selecciona el archivo de una de las dos formas de restauración."""
@@ -449,6 +609,10 @@ class App(tk.Tk):
         if not self.busy:
             self.files.clear()
             self.listing.delete(0, 'end')
+            self.archive_files.clear()
+            if self.archive_workspace is not None:
+                self.archive_workspace.cleanup()
+                self.archive_workspace = None
 
     def choose_recovery(self):
         if self.busy:
@@ -536,7 +700,7 @@ class App(tk.Tk):
             return
         mode = self.mode.get()
         try:
-            validar_carpetas(self.folders)
+            validar_carpetas({key: path for key, path in self.folders.items() if key != 'originales'})
         except ValueError as error:
             messagebox.showerror('Carpetas', str(error))
             return

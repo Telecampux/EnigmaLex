@@ -30,6 +30,10 @@ python app.py
 8. Pulse **Autorizar seleccionados y generar** para guardar. Cancelar la revisión no genera ningún archivo. Si no hay coincidencias, se muestra el texto reconocido y se puede autorizar explícitamente una copia sin coincidencias o el sustituto indicado en los avisos.
 9. Revise el resultado antes de compartirlo. Cero coincidencias no significa que el archivo carezca de datos sensibles.
 
+En tutelas manuscritas escaneadas, la revisión visual muestra una fila por cada página aunque el OCR haya propuesto datos. Compruebe todas las apariciones del nombre, cédula, radicado, TD, NUI, ubicación precisa (patio o estructura) y huella. Dibuje zonas adicionales sobre lo que el OCR no detecte y compruebe el PDF generado antes de compartirlo. El original se conserva en la recuperación local.
+
+En escritos manuscritos, el análisis busca etiquetas de identidad aun cuando el OCR las lea con pequeñas diferencias. Propone cajas ajustadas a los valores del nombre, números, ubicación precisa y huella, dejando visibles las etiquetas y el texto vecino. Las zonas aparecen seleccionadas automáticamente: no es necesario dibujarlas cuando el detector las ubica. La detección sigue siendo heurística; revise el resultado antes de compartirlo, sobre todo si la letra es difícil de leer o el documento tiene otra disposición.
+
 **Cancelar anonimización** permite detener el análisis, el OCR en curso o la generación. Se interrumpe el lote y se elimina la salida incompleta del archivo en curso; los originales permanecen intactos. Los archivos del lote que ya terminaron se conservan. Durante la revisión puede usar **Cancelar sin generar archivos**.
 
 ### Anexos e historias clínicas

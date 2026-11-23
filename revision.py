@@ -106,12 +106,12 @@ class ReviewWindow(tk.Toplevel):
             for finding in plan.findings.values():
                 self.add_row(index, finding['id'], finding['kind'], finding['value'], finding['location'])
             if not plan.findings:
-                action = 'PDF sustituto: omitir TODO el contenido' if any('PDF sustituto' in w for w in plan.warnings) else 'Generar copia sin datos detectados; revisar texto reconocido'
+                action = 'PDF sustituto: omitir TODO el contenido' if any('PDF sustituto' in w for w in plan.warnings) else 'Sin datos detectados; revise el documento'
                 self.add_row(index, None, 'SIN HALLAZGOS', action, 'Archivo completo')
-            found_locations = {finding['location'] for finding in plan.findings.values()}
             for location, evidence in plan.evidence.items():
-                if evidence.get('image') and location not in found_locations:
-                    self.add_row(index, None, 'REVISAR PÁGINA', 'Sin propuestas automáticas; revise el texto reconocido', location)
+                if evidence.get('image'):
+                    self.add_row(index, None, 'REVISAR PÁGINA',
+                                 'Revise nombre, cédula, radicado, TD, NUI, patio y huella', location)
         if not self.restoring:
             for row, (index, identity) in self.rows.items():
                 finding = plans[index].findings.get(identity, {})
@@ -124,6 +124,9 @@ class ReviewWindow(tk.Toplevel):
         notebook.pack(fill='both', expand=True, pady=8)
         text_frame, image_frame = ttk.Frame(notebook), ttk.Frame(notebook)
         notebook.add(text_frame, text='Contexto y texto reconocido')
+        self.notebook, self.image_frame = notebook, image_frame
+        if not self.restoring:
+            notebook.add(image_frame, text='Imagen y zonas manuales')
         if not self.restoring:
             metadata_tab = ttk.Frame(notebook)
             notebook.add(metadata_tab, text='✓ Metadatos')
@@ -166,6 +169,11 @@ class ReviewWindow(tk.Toplevel):
         hscroll.pack(side='bottom', fill='x')
         self.canvas.pack(fill='both', expand=True)
         self.canvas.bind('<Configure>', lambda event: self.draw_image())
+        if not self.restoring:
+            self.canvas.bind('<ButtonPress-1>', self.start_region)
+            self.canvas.bind('<B1-Motion>', self.drag_region)
+            self.canvas.bind('<ButtonRelease-1>', self.finish_region)
+            ttk.Label(zoom_bar, text='Arrastre sobre cada dato manuscrito para ocultarlo.').pack(side='left', padx=8)
         ttk.Label(frame, text='Seleccione cada aparición que autoriza restaurar. Las demás conservarán su código.' if self.restoring else 'Revise los datos y marque los que autoriza anonimizar.', wraplength=1050).pack(anchor='w')
         bottom = ttk.Frame(frame)
         bottom.pack(fill='x', pady=(10, 0))
@@ -178,11 +186,12 @@ class ReviewWindow(tk.Toplevel):
         self.grab_set()
 
     def add_row(self, plan_index, finding_id, kind, value, location):
-        row = self.table.insert('', 'end', values=('☐', kind, value, self.plans[plan_index].path.name + ' / ' + location))
+        row = self.table.insert('', 'end', values=('☐' if finding_id else '', kind, value, self.plans[plan_index].path.name + ' / ' + location))
         self.rows[row] = (plan_index, finding_id)
         self.row_locations[row] = location
         if kind == 'METADATO':
             self.metadata_rows.add(row)
+        return row
 
     def sync_metadata_rows(self, *_):
         selected = self.clean_metadata.get()
@@ -201,6 +210,8 @@ class ReviewWindow(tk.Toplevel):
     def toggle(self, row, redraw=True):
         if row in self.metadata_rows:
             self.clean_metadata.set(not self.clean_metadata.get())
+            return
+        if self.rows[row][1] is None:
             return
         if row in self.chosen:
             self.chosen.remove(row)
@@ -233,6 +244,7 @@ class ReviewWindow(tk.Toplevel):
         self.draw_image()
 
     def show_selected(self, event=None):
+        self.drag_start = None
         selection = self.table.selection()
         if not selection:
             return
@@ -253,14 +265,23 @@ class ReviewWindow(tk.Toplevel):
             if evidence is None:
                 evidence = next((item for item in plan.evidence.values() if item.get('image')), None)
         self.current = (evidence, finding)
+        if not self.restoring and evidence and evidence.get('image') and (not finding or finding.get('caption')):
+            self.notebook.select(self.image_frame)
         self.context.configure(state='normal')
         self.context.delete('1.0', 'end')
         if finding:
-            proposal = f"Restaurar dato original: {finding['token']}" if self.restoring else f"Ocultar en imagen/PDF o sustituir por {finding['token']} en texto."
+            if self.restoring:
+                proposal = f"Restaurar dato original: {finding['token']}"
+            elif finding.get('caption'):
+                proposal = 'Ocultar la imagen completa.'
+            elif finding.get('token'):
+                proposal = f"Ocultar en imagen/PDF o sustituir por {finding['token']} en texto."
+            else:
+                proposal = 'Ocultar la zona marcada.'
             self.context.insert('end', f"Archivo: {plan.path.name}\nUbicación: {finding['location']}\nDato: {finding['value']}\nPropuesta: {proposal}\n\nCONTEXTO:\n{finding['context']}\n\n")
         else:
             self.context.insert('end', 'No se encontraron coincidencias. Revise el texto reconocido y añada los datos que desea ocultar.\n\n')
-        texts = [evidence] if finding and evidence else list(plan.evidence.values())
+        texts = [evidence] if evidence else list(plan.evidence.values())
         for item in texts:
             self.context.insert('end', 'TEXTO LEÍDO:\n' + item['text'] + '\n\n')
         if finding:
@@ -300,8 +321,9 @@ class ReviewWindow(tk.Toplevel):
             if boxes:
                 box = (min(item[0] for item in boxes), min(item[1] for item in boxes),
                        max(item[2] for item in boxes), max(item[3] for item in boxes))
-                if selected.get('token'):
-                    image_label(image, box, selected['token'])
+                label = selected.get('token') or selected.get('caption')
+                if label:
+                    image_label(image, box, label)
                 else:
                     draw_redaction(drawing, box)
         return image
@@ -353,7 +375,7 @@ class ReviewWindow(tk.Toplevel):
         selected = self.table.selection()
         if not selected:
             return
-        index, finding_id = self.rows[selected[0]]
+        index, _ = self.rows[selected[0]]
         plan = self.plans[index]
         evidence = self.current[0]
         location = next(key for key, item in plan.evidence.items() if item is evidence)
@@ -363,26 +385,12 @@ class ReviewWindow(tk.Toplevel):
             self.canvas.delete('selection')
             messagebox.showinfo('Zona demasiado pequeña', 'Marque toda la zona que desea ocultar.', parent=self)
             return
-        if finding_id and plan.findings.get(finding_id, {}).get('kind') == 'ZONA':
-            plan.findings[finding_id]['box'] = box
-            if selected[0] not in self.chosen:
-                self.toggle(selected[0], redraw=False)
-            self.canvas.delete('selection')
-            self.show_selected()
-            return
         identity = 'zona_' + secrets.token_hex(12)
-        token = f'ANON_FIRMA_{plan.case_id}_{sum(f.get("kind") == "ZONA" for f in plan.findings.values()) + 1:04d}'
-        plan.findings[identity] = {'id': identity, 'kind': 'ZONA', 'value': 'Sección de firma',
+        plan.findings[identity] = {'id': identity, 'kind': 'ZONA', 'value': 'Zona marcada a mano',
             'location': location, 'box': box, 'start': -1, 'stop': -1,
             'context': 'Se ocultará completamente el rectángulo dibujado al autorizar esta propuesta.',
-            'token': token}
-        for row, (row_index, row_id) in list(self.rows.items()):
-            if row_index == index and row_id is None and self.row_locations[row] == location:
-                self.chosen.discard(row)
-                self.table.delete(row)
-                del self.rows[row]
-        self.add_row(index, identity, 'ZONA', 'Sección de firma', location)
-        row = next(row for row, value in self.rows.items() if value == (index, identity))
+            'token': ''}
+        row = self.add_row(index, identity, 'ZONA', 'Zona marcada a mano', location)
         self.toggle(row, redraw=False)
         self.table.selection_set(row)
         self.table.see(row)

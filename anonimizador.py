@@ -13,7 +13,7 @@ from contextlib import contextmanager
 import zipfile
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from ocr_local import OCRError, redact as ocr_redact
+from ocr_local import OCRError, handwriting_regions, redact as ocr_redact
 from procesamiento import ProcessingCancelled, check_cancelled
 from entidades import known_entity_spans
 
@@ -38,14 +38,24 @@ NON_PERSON_WORDS = frozenset({
     'CONSULTA', 'EXTERNA', 'ENFERMEDAD', 'COTIZANTE', 'CONTRIBUTIVO', 'SUBSIDIADO',
     'FEMENINO', 'MASCULINO', 'URGENCIAS', 'HOSPITALIZACIÓN', 'HOSPITALIZACION',
 })
+ID_NUMBER = (
+    r'[ \t:.#–-]*(?:(?:n[úu]mero|n(?:ro|[oº°])?\.?|n[.][º°o])(?=[\s:.#-]|\d))?'
+    r'[ \t:.#º°–-]*(?:\n[ \t]*)?'
+    r'(\d(?:[.\- \t\u00a0\u202f]*\d){4,14})(?![\w/]|[.\- \t\u00a0\u202f]*\d)'
+)
 PATTERNS = {
     'CORREO': re.compile(
         r'(?i)(?<![\w@])[A-Z0-9](?:[A-Z0-9._%+-]*[A-Z0-9])?[ \t]*@[ \t]*'
         r'(?:[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?[ \t]*\.[ \t]*)+'
         r'[A-Z]{2,}(?![\w@])'),
-    'DOCUMENTO': re.compile(r'(?i)\b(?:c[. ]?c[.]?|c[eé]dula(?:\s+de\s+ciudadan[ií]a)?|pasaporte|documento)\s*(?:n[úu]mero|n\s*[º°o.*]|:|#)?\s*([\d][\d. -]{4,18}\d)(?!\w)'),
+    'DOCUMENTO': re.compile(
+        r'(?i)\b(?:c[. \t]*c\.?|c[eé]dula(?:\s+de\s+(?:ciudadan[ií]a|extranjer[ií]a))?'
+        r'|pasaporte|documento(?:\s+de\s+identidad)?)(?![^\W\d_])' + ID_NUMBER),
     'PERSONA': re.compile(r'(?i:\b(?:(?:afiliado|paciente)\s*:\s*(?:CC|C\.C\.?|TI|CE|RC)\s*[.:\-]?\s*\d[\d.]*|nombre(?: completo)?|accionante|accionado|demandante|demandado|paciente|señor|señora|autorizador|ordenado\s+p[oe]r|registr[oe]\s+impreso\s+por))\s*[:;.\-]?\s*(' + PERSON_NAME + r')'),
-    'IDENTIFICACION': re.compile(r'(?i)(?<!\w)(?:CC|TI|RC|CE|NUIP|identificaci[oó]n)\s*[:.\-]?\s*(\d[\d. -]{4,18}\d)(?!\w)'),
+    'IDENTIFICACION': re.compile(
+        r'(?i)\b(?:t[. \t]*i\.?|r[. \t]*c\.?|c[. \t]*e\.?|nuip'
+        r'|identificaci[oó]n(?:\s+del\s+paciente)?|tarjeta\s+de\s+identidad'
+        r'|registro\s+civil)(?![^\W\d_])' + ID_NUMBER),
     'NOMBRE_FORMULARIO': re.compile(r'(?m)^[ \t]*(?i:nombres?(?:\s+y\s+apellidos)?|apellidos?|nombre\s+del\s+paciente)[ \t]*[:\-]?[ \t]*\n[ \t]*(' + PERSON_NAME + r')[ \t]*(?:\n|$)'),
     'PROFESIONAL': re.compile(r'(?i:\b(?:prof|doctor|doctora|m[eé]dico|m[eé]dica))\s*[:.][ \t]*(' + PERSON_NAME + r')'),
 }
@@ -133,17 +143,24 @@ class Replacer:
                         region = (min(b[0] for b in boxes), min(b[1] for b in boxes),
                                   max(b[2] for b in boxes), max(b[3] for b in boxes))
                         duplicate = False
-                        for previous_value, old in self.ocr_seen:
-                            if previous_value != value.casefold():
+                        for previous_value, old, previous_kind in self.ocr_seen:
+                            same = previous_value == value.casefold()
+                            partial_name = (kind in PERSON_KINDS and previous_kind in PERSON_KINDS
+                                            and value.casefold().split() != previous_value.split()
+                                            and ' ' + ' '.join(value.casefold().split()) + ' ' in
+                                            ' ' + ' '.join(previous_value.split()) + ' ')
+                            if not (same or partial_name):
                                 continue
                             intersection = max(0, min(region[2], old[2])-max(region[0], old[0])) * max(0, min(region[3], old[3])-max(region[1], old[1]))
-                            area = max((region[2]-region[0])*(region[3]-region[1]), (old[2]-old[0])*(old[3]-old[1]))
+                            area = (region[2]-region[0])*(region[3]-region[1])
+                            if same:
+                                area = max(area, (old[2]-old[0])*(old[3]-old[1]))
                             if area and intersection / area > 0.7:
                                 duplicate = True
                                 break
                         if duplicate:
                             continue
-                        self.ocr_seen.append((value.casefold(), region))
+                        self.ocr_seen.append((value.casefold(), region, kind))
                 identity = json.dumps([self.location, scope[1], encounter, start, stop, kind, value], ensure_ascii=False)
                 finding_id = hashlib.sha256(identity.encode()).hexdigest()
                 if self.reviewing and finding_id not in self.findings:
@@ -269,6 +286,8 @@ def _archive(data, replacer, depth):
                     continue
                 with replacer.at(info.filename):
                     payload = transform(payload, Path(info.filename).suffix, replacer, depth + 1)
+            if replacer.learning:
+                continue
             suffix = replacer.output_suffix or Path(info.filename).suffix
             # Flat, anonymous names prevent identifiers leaking through internal paths.
             entry_name = f'archivo_{index+1:04d}{suffix}'
@@ -436,6 +455,19 @@ def _replace_xml(root, replacer):
             highlight.set(f'{{{ns_word}}}val', 'yellow')
 
 
+def _pdf_words(page):
+    parts, word_spans, offset, last_line = [], [], 0, None
+    for x0, y0, x1, y1, word, block, line, _ in page.get_text('words', sort=True):
+        current_line = (block, line)
+        separator = '' if last_line is None else (' ' if current_line == last_line else '\n')
+        parts.extend((separator, word))
+        offset += len(separator)
+        word_spans.append((offset, offset + len(word), (x0, y0, x1, y1), 100))
+        offset += len(word)
+        last_line = current_line
+    return ''.join(parts), word_spans
+
+
 def _pdf(data, replacer):
     import pymupdf
     from PIL import Image
@@ -449,12 +481,25 @@ def _pdf(data, replacer):
             with replacer.at(f'Página {page.number+1}'):
                 stage = 'Analizando' if replacer.reviewing or replacer.learning else 'Anonimizando'
                 replacer.progress(f'{stage} página {page.number+1} de {len(doc)}')
-                if page.get_images() or not page.get_text().strip():
+                text, word_spans = _pdf_words(page)
+                images = page.get_image_info()
+                if images or not text:
                     # Rasterize mixed and scanned pages: the output cannot retain the
                     # original scan or a hidden text layer underneath the black marks.
                     pix = page.get_pixmap(dpi=300, alpha=False, colorspace=pymupdf.csRGB, annots=False)
                     image = Image.frombytes('RGB', (pix.width, pix.height), pix.samples)
-                    redacted = ocr_redact(image, replacer)
+                    # Mixed pages can have exact, selectable names even when
+                    # OCR sees only part of the same name.
+                    native_words = [
+                        (a, b, tuple(value * 300 / 72 for value in pymupdf.Rect(box) * page.rotation_matrix),
+                         confidence)
+                        for a, b, box, confidence in word_spans
+                    ]
+                    placements = [tuple(value * 300 / 72 for value in
+                                        (pymupdf.Rect(info['bbox']) * page.rotation_matrix) & page.rect)
+                                  for info in images]
+                    redacted = ocr_redact(image, replacer, native=(text, native_words),
+                                          image_boxes=placements or None)
                     if replacer.learning or replacer.reviewing:
                         continue
                     buffer = io.BytesIO()
@@ -468,16 +513,6 @@ def _pdf(data, replacer):
                         target.insert_text((x0, y1), token, fontsize=max(3, min(9, y1-y0)),
                                            fontname='helv', render_mode=3)
                     continue
-                parts, word_spans, offset, last_line = [], [], 0, None
-                for x0, y0, x1, y1, word, block, line, _ in page.get_text('words', sort=True):
-                    current_line = (block, line)
-                    separator = '' if last_line is None else (' ' if current_line == last_line else '\n')
-                    parts.extend((separator, word))
-                    offset += len(separator)
-                    word_spans.append((offset, offset + len(word), (x0, y0, x1, y1), 100))
-                    offset += len(word)
-                    last_line = current_line
-                text = ''.join(parts)
                 if replacer.learning:
                     list(replacer.spans(text))
                     continue
@@ -490,11 +525,14 @@ def _pdf(data, replacer):
                         boxes.append((a, b, tuple(v * scale for v in rect), confidence))
                     replacer.evidence[replacer.location] = {'text': text, 'image': pix.tobytes('png'), 'words': boxes}
                 labels = []
+                # Extracted words and redaction rectangles use unrotated
+                # coordinates relative to the visible page, not the crop box.
+                bounds = page.rect * page.derotation_matrix
                 for start, stop, token in replacer.spans(text):
                     matched = []
                     for a, b, box, _ in word_spans:
                         if start < b and stop > a:
-                            clipped = pymupdf.Rect(box) & page.cropbox
+                            clipped = pymupdf.Rect(box) & bounds
                             if not clipped.is_empty:
                                 page.add_redact_annot(clipped, fill=(64/255, 64/255, 64/255))
                                 matched.append(clipped)
@@ -502,6 +540,8 @@ def _pdf(data, replacer):
                         area = pymupdf.Rect(min(r.x0 for r in matched), min(r.y0 for r in matched),
                                             max(r.x1 for r in matched), max(r.y1 for r in matched))
                         labels.append((area, token))
+                    elif not replacer.reviewing:
+                        raise AnonymizationError('No se pudo cubrir un dato seleccionado en la página.')
                     replacer.count += 1
                 for region in replacer.regions.get(replacer.location, []):
                     box = region['box'] if isinstance(region, dict) else region
@@ -512,6 +552,8 @@ def _pdf(data, replacer):
                         page.add_redact_annot(rect * page.derotation_matrix, fill=(1, 0.95, 0.66))
                         if isinstance(region, dict) and region.get('token'):
                             labels.append((rect * page.derotation_matrix, region['token']))
+                    elif not replacer.reviewing:
+                        raise AnonymizationError('No se pudo cubrir una zona seleccionada en la página.')
                     replacer.count += 1
                 if replacer.reviewing:
                     continue
@@ -520,7 +562,8 @@ def _pdf(data, replacer):
                         page.delete_annot(annot)
                 for link in page.get_links():
                     page.delete_link(link)
-                page.apply_redactions()
+                if not page.apply_redactions() and (labels or replacer.regions.get(replacer.location)):
+                    raise AnonymizationError('No se pudieron aplicar las coberturas seleccionadas en la página.')
                 for area, token in labels:
                     pdf_label(page, area, token)
                 clean.insert_pdf(doc, from_page=page.number, to_page=page.number, links=False, annots=False, widgets=False)
@@ -551,12 +594,16 @@ def transform(data, suffix, replacer, depth=0):
                 names = z.namelist()
             inferred = next((ext for part, ext in [('word/document.xml', '.docx'), ('xl/workbook.xml', '.xlsx'), ('ppt/presentation.xml', '.pptx')] if part in names), None)
             if inferred or (suffix in OFFICE and 'content.xml' in names):
+                if replacer.learning:
+                    return b''
                 result = _office(data, inferred or suffix, replacer)
                 replacer.output_suffix = replacer.output_suffix or inferred or suffix
                 return result
             result = _archive(data, replacer, depth)
             replacer.output_suffix = replacer.output_suffix or '.zip'
             return result
+        if replacer.learning:
+            return b''
         from PIL import Image, UnidentifiedImageError
         try:
             with Image.open(io.BytesIO(data)):
@@ -673,32 +720,210 @@ def analyze(path, manual=(), automatic=True, progress=None):
         metadata = [('Archivo', 'lectura de metadatos', 'No se pudieron enumerar; revise el archivo original.')]
     metadata.insert(0, ('Archivo', 'nombre original', path.name))
     cache, known_entities = {}, {}
-    if automatic and data.startswith(b'%PDF-'):
+    if automatic and (data.startswith(b'%PDF-') or zipfile.is_zipfile(io.BytesIO(data))):
         learner = Replacer(manual, automatic=True, progress=progress, ocr_cache=cache, learning=True)
-        try:
-            _pdf(data, learner)
-        except (OCRError, ProcessingCancelled):
-            raise
-        except Exception:
-            # Keep the normal reader's damaged/protected-file handling below.
-            pass
+        transform(data, path.suffix, learner)
         known_entities = {kind: tuple(sorted(values)) for kind, values in learner.discovered_entities.items()}
     replacer = Replacer(manual, automatic, reviewing=True, progress=progress,
                         ocr_cache=cache, known_entities=known_entities)
     replacer.progress('Analizando: ' + path.name)
     transform(data, path.suffix, replacer)
     if automatic:
+        _propose_identity_cards(replacer)
+        _propose_handwriting(replacer)
         _propose_signature_blocks(replacer)
+        _propose_manuscript_identity_blocks(replacer)
+        _remove_redundant_manuscript_proposals(replacer)
     return ReviewPlan(path, data, tuple(manual), automatic, replacer.findings,
                       replacer.evidence, replacer.warnings, replacer.ocr_pages,
                       replacer.ocr_cache, replacer.output_suffix or path.suffix, case_id=replacer.case_id,
                       known_entities=known_entities, metadata=metadata)
 
 
+def _propose_manuscript_identity_blocks(replacer):
+    """Propose narrow value boxes, preserving the surrounding petition text."""
+    from PIL import Image
+    from entidades import edit_distance, normalized_word
+
+    labels = {'accionante', 'nombre', 'radicado', 'cedula', 'ciudadania',
+              'identificado', 'identificada', 'nui', 'patio', 'huella', 'yo', 'td', 'cc'}
+    def classify(word):
+        value = normalized_word(word.strip(':.,*#%')).lower()
+        if not value or len(value) < 2:
+            return None
+        return next((candidate for candidate in labels
+                     if value == candidate or (len(value) >= 5 and
+                     abs(len(value)-len(candidate)) <= 2 and
+                     edit_distance(value, candidate) <= 2)), None)
+
+    for location, evidence in replacer.evidence.items():
+        if not evidence.get('scanned') or not evidence.get('image'):
+            continue
+        with Image.open(io.BytesIO(evidence['image'])) as image:
+            width, height = image.size
+        text = evidence['text']
+        first_pass_end = text.lower().find('powered by')
+        if first_pass_end < 0:
+            first_pass_end = min(len(text), text.find('\n\n') if '\n\n' in text else len(text))
+        words = [(text[a:b], box) for a, b, box, _ in evidence['words'] if a < first_pass_end]
+        if not words:
+            continue
+        rows = []
+        for word, box in sorted(words, key=lambda item: (item[1][1]+item[1][3])/2):
+            cy = (box[1]+box[3])/2
+            row = next((item for item in rows if abs(item['cy']-cy) < height*.012), None)
+            if row is None:
+                row = {'cy': cy, 'words': []}
+                rows.append(row)
+            row['words'].append((word, box))
+        for row in rows:
+            row['words'].sort(key=lambda item: item[1][0])
+            row['labels'] = [(classify(word), box) for word, box in row['words'] if classify(word)]
+
+        def cover(selected, kind):
+            if not selected:
+                return
+            margin_x, margin_y = round(width*.007), round(height*.004)
+            box = (max(0, min(box[0] for _, box in selected)-margin_x),
+                   max(0, min(box[1] for _, box in selected)-margin_y),
+                   min(width, max(box[2] for _, box in selected)+margin_x),
+                   min(height, max(box[3] for _, box in selected)+margin_y))
+            _add_manuscript_zone(replacer, location, box, kind)
+
+        for index, row in enumerate(rows):
+            row_words = row['words']
+            for label, anchor in row['labels']:
+                after = [(word, box) for word, box in row_words if box[0] >= anchor[2]]
+                if label in {'accionante', 'nombre', 'yo'}:
+                    cover(after[:8] if label != 'yo' else after[:4], 'Nombre manuscrito')
+                    if label == 'accionante':
+                        # The ID and detention location often occupy the next lines.
+                        for later in rows[index+1:index+4]:
+                            if later['cy']-row['cy'] > height*.055:
+                                break
+                            numeric = [(word, box) for word, box in later['words']
+                                       if sum(char.isdigit() for char in word) >= 2]
+                            cover(numeric, 'Identificación manuscrita')
+                            patio = next((box for word, box in later['words'] if classify(word) == 'patio'), None)
+                            if patio:
+                                cover([(word, box) for word, box in later['words'] if box[0] >= patio[0]], 'Ubicación precisa')
+                                following = rows[rows.index(later)+1] if rows.index(later)+1 < len(rows) else None
+                                if following and following['cy']-later['cy'] < height*.025:
+                                    cover(following['words'][:2], 'Estructura precisa')
+                    if label == 'yo' and index+1 < len(rows):
+                        following = rows[index+1]
+                        if following['cy']-row['cy'] < height*.025:
+                            cover([(word, box) for word, box in following['words']
+                                   if sum(char.isdigit() for char in word) >= 2], 'Identificación manuscrita')
+                elif label in {'radicado', 'patio', 'td', 'nui', 'cc'}:
+                    cover(after, 'Dato manuscrito: '+label)
+                elif label in {'cedula', 'ciudadania'}:
+                    cover([(word, box) for word, box in row_words
+                           if sum(char.isdigit() for char in word) >= 2], 'Número de identificación')
+
+        # Some OCR passes place the short "Yo:" label in a separate row from
+        # the name, even though both are on the same handwritten line.
+        for pos, (word, anchor) in enumerate(words):
+            if classify(word) != 'yo':
+                continue
+            following = [(value, box) for value, box in words[pos+1:pos+12]
+                         if anchor[1]-height*.015 <= box[1] <= anchor[3]+height*.012
+                         and box[0] > anchor[2]]
+            cover(following[:4], 'Nombre manuscrito')
+
+        # A compact closing block often has unlabeled numeric lines and a
+        # fingerprint. Cover each numeric value separately, then the print.
+        footer_rows = [row for row in rows if row['cy'] > height*.4 and
+                       any(label in {'nombre', 'patio', 'cc', 'td', 'nui'} for label, _ in row['labels'])]
+        if len(footer_rows) >= 2 and footer_rows[-1]['cy']-footer_rows[0]['cy'] < height*.25:
+            top, bottom = footer_rows[0]['cy'], footer_rows[-1]['cy']
+            for row in rows:
+                if top < row['cy'] < bottom:
+                    cover([(word, box) for word, box in row['words']
+                           if sum(char.isdigit() for char in word) >= 2], 'Número manuscrito')
+            print_box = (round(width*.73), max(0, round(top+height*.025)),
+                         round(width*.88), min(height, round(bottom+height*.02)))
+            _add_manuscript_zone(replacer, location, print_box, 'Huella digital')
+
+
+def _add_manuscript_zone(replacer, location, box, value):
+    identity = 'manuscrito_' + hashlib.sha256(f'{location}:{box}'.encode()).hexdigest()
+    replacer.findings[identity] = {
+        'id': identity, 'kind': 'ZONA', 'value': value,
+        'location': location, 'box': box, 'start': -1, 'stop': -1,
+        'context': 'Zona detectada por etiquetas OCR y disposici\u00f3n de la p\u00e1gina; compruebe el resultado.',
+        'caption': '[DATO RESERVADO]',
+    }
+
+
+def _remove_redundant_manuscript_proposals(replacer):
+    """Avoid wider OCR guesses covering text beside a precise identity field."""
+    precise = [finding for key, finding in replacer.findings.items()
+               if key.startswith('manuscrito_')]
+    for key, finding in list(replacer.findings.items()):
+        if not finding['value'].startswith('Posible manuscrito'):
+            continue
+        x0, y0, x1, y1 = finding['box']
+        evidence = replacer.evidence.get(finding['location'])
+        if evidence and evidence.get('image'):
+            from PIL import Image
+            with Image.open(io.BytesIO(evidence['image'])) as image:
+                if x0 > image.width*.75 and y0 > image.height*.90:
+                    del replacer.findings[key]
+                    continue
+        for item in precise:
+            if item['location'] != finding['location']:
+                continue
+            a, b, c, d = item['box']
+            overlap_y = max(0, min(y1, d)-max(y0, b))
+            if overlap_y > (y1-y0)*.45 and max(x0, a) < min(x1, c):
+                del replacer.findings[key]
+                break
+
+
+def _propose_identity_cards(replacer):
+    for location, evidence in replacer.evidence.items():
+        for box in evidence.get('identity_cards', ()):
+            identity = 'cedula_' + hashlib.sha256(f'{location}:{box}'.encode()).hexdigest()
+            replacer.findings[identity] = {
+                'id': identity, 'kind': 'ZONA', 'value': 'Cédula completa',
+                'location': location, 'box': box, 'start': -1, 'stop': -1,
+                'caption': 'Cédula oculta',
+                'context': 'La imagen completa se ocultará, incluidos el nombre, la foto y los números.',
+            }
+
+
+def _propose_handwriting(replacer):
+    from PIL import Image
+
+    for location, evidence in replacer.evidence.items():
+        if not evidence.get('scanned'):
+            continue
+        replacer.progress(f'Buscando campos manuscritos: {location}')
+        with Image.open(io.BytesIO(evidence['image'])) as image:
+            regions = handwriting_regions(image, evidence['text'], evidence['words'])
+        for box, label, reading in regions:
+            if any(min(box[2], card[2]) > max(box[0], card[0])
+                   and min(box[3], card[3]) > max(box[1], card[1])
+                   for card in evidence.get('identity_cards', ())):
+                continue
+            identity = hashlib.sha256(f'{location}:{box}:{label}'.encode()).hexdigest()
+            digest = hashlib.sha256(f'{replacer.case_id}:{identity}'.encode()).hexdigest()[:10].upper()
+            value = f'Posible manuscrito · {label.capitalize()}'
+            if reading:
+                value = f'{value} · {reading}'
+            replacer.findings[identity] = {
+                'id': identity, 'kind': 'ZONA', 'value': value, 'location': location,
+                'box': box, 'start': -1, 'stop': -1, 'token': f'M{digest}',
+                'context': 'Revise que la zona cubra todo el trazo. Se oculta la imagen completa del campo aunque su lectura sea incierta.',
+            }
+
+
 def _propose_signature_blocks(replacer):
     """Propose a visual redaction around printed signature labels on PDF pages."""
     for location, evidence in replacer.evidence.items():
-        if not location.startswith('Documento / Página ') or not evidence.get('image'):
+        if (not re.search(r' / Página \d+$', location) or not evidence.get('image')
+                or evidence.get('identity_cards')):
             continue
         from PIL import Image
         with Image.open(io.BytesIO(evidence['image'])) as image:
@@ -810,12 +1035,14 @@ def apply_review(plan, approved, output_dir, progress=None):
                 with Image.open(io.BytesIO(evidence['image'])) as preview:
                     width, height = preview.size
                 x0, y0, x1, y1 = finding['box']
-                box = (max(0, min(width - 1, x0)), max(0, min(height - 1, y0)),
-                       max(0, min(width - 1, x1)), max(0, min(height - 1, y1)))
+                box = (max(0, min(width, x0)), max(0, min(height, y0)),
+                       max(0, min(width, x1)), max(0, min(height, y1)))
                 if box[2] <= box[0] or box[3] <= box[1]:
                     raise AnonymizationError('La zona seleccionada está fuera de la página. Ajústela en la revisión.')
                 finding['box'] = box
             region = {'box': finding['box']}
+            if finding.get('caption'):
+                region['caption'] = finding['caption']
             if finding.get('token'):
                 region['token'] = finding['token']
             replacer.regions.setdefault(finding['location'], []).append(region)
