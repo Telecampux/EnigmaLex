@@ -759,6 +759,9 @@ def _propose_manuscript_identity_blocks(replacer):
     for location, evidence in replacer.evidence.items():
         if not evidence.get('scanned') or not evidence.get('image'):
             continue
+        if (evidence.get('native_word_count', 0) >= 3 and
+                evidence.get('ocr_word_count', 0) <= 2):
+            continue
         with Image.open(io.BytesIO(evidence['image'])) as image:
             width, height = image.size
         text = evidence['text']

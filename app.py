@@ -447,7 +447,7 @@ class App(tk.Tk):
         self.run_button.config(text=label,
                                state='normal' if self.judgment.get() and self.recovery.get() else 'disabled')
         self.mode_hint.set('Seleccione el archivo anonimizado y su recuperación. Todo se procesa en este equipo.' if original else
-                           'Seleccione la providencia PDF con texto seleccionable y sus códigos intactos. Se restaurará localmente en PROVIDENCIAS\\RESTAURADAS.')
+                           'Seleccione la providencia PDF, Word o de texto con sus códigos intactos. Se restaurará localmente en PROVIDENCIAS\\RESTAURADAS.')
 
     def choose(self):
         if self.busy:
@@ -564,13 +564,15 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             title='Seleccione el archivo anonimizado original' if original else
                   'Seleccione el documento anonimizado elaborado por el sustanciador',
-            initialdir=str(self.folders['anonimizados'] if original else self.folders['providencias']),
+            initialdir=str(self.folders['anonimizados'] if original else
+                           (Path.home() / 'Downloads' if (Path.home() / 'Downloads').is_dir() else self.folders['providencias'])),
             filetypes=[('Todos los archivos', '*')] if original else
-                      [('PDF con texto seleccionable', '*.pdf')])
+                      [('Providencias PDF, Word y texto', '*.pdf *.docx *.txt *.md *.log *.rst'),
+                       ('Todos los archivos', '*')])
         if not path:
             return
-        if not original and Path(path).suffix.lower() != '.pdf':
-            messagebox.showerror('Providencia', 'Seleccione una providencia PDF con texto seleccionable.')
+        if not original and Path(path).suffix.lower() not in {'.pdf', '.docx', '.txt', '.md', '.log', '.rst'}:
+            messagebox.showerror('Providencia', 'Seleccione una providencia PDF, Word o de texto.')
             return
         self.selected_restored.set('')
         self.judgment.set(path)

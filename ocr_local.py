@@ -347,6 +347,7 @@ def redact(image, replacer, *, native=('', ()), image_boxes=None):
         replacer.ocr_cache[cache_key] = recognize(image)
     text, words = replacer.ocr_cache[cache_key]
     native_text, native_words = native
+    ocr_word_count = len(words)
     if native_words:
         offset = len(native_text) + 2
         text = native_text + '\n\n' + text
@@ -371,7 +372,9 @@ def redact(image, replacer, *, native=('', ()), image_boxes=None):
         preview = io.BytesIO()
         image.save(preview, format='PNG')
         replacer.evidence[replacer.location] = {'image': preview.getvalue(), 'words': words, 'text': text,
-                                                'scanned': True, 'identity_cards': cards}
+                                                'scanned': True, 'identity_cards': cards,
+                                                'native_word_count': len(native_words),
+                                                'ocr_word_count': ocr_word_count}
     drawing = ImageDraw.Draw(image)
     replacer.ocr_words, replacer.ocr_seen = words, []
     try:

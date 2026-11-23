@@ -179,8 +179,8 @@ def apply_field_review(plan, approved, output_dir, progress=None):
 
 def restore_judgment(path, recovery, output_dir, progress=None):
     """Restore every existing code in the judgment, without manual selection."""
-    if Path(path).suffix.lower() != '.pdf':
-        raise AnonymizationError('La providencia debe ser un PDF con texto seleccionable y códigos intactos.')
+    if Path(path).suffix.lower() not in {'.pdf', '.docx', '.txt', '.md', '.log', '.rst'}:
+        raise AnonymizationError('Seleccione una providencia PDF, Word o de texto con códigos intactos.')
     plan = analyze_field_restoration(path, recovery, progress)
     codes = set(re.findall(r'(?<!\w)(?:ANON_[A-Z_]+_\d{4,}|A[A-F0-9]{7})(?!\w)',
                            '\n'.join(item['text'] for item in plan.evidence.values())))

@@ -52,8 +52,9 @@ class FieldRestorationTests(unittest.TestCase):
             files=['demanda_original.docx'], recovery=variable('caso.restauracion'),
             output=variable('salida'), manual=variable(''), auto=variable(True),
             run_button=Mock(), activity=Mock(), status=Mock(), work=Mock(),
-            cancel_event=threading.Event(), cancel_button=Mock(), clear_progress=Mock())
-        with patch('app.messagebox.showerror') as error, patch('app.threading.Thread') as thread:
+            cancel_event=threading.Event(), cancel_button=Mock(), clear_progress=Mock(),
+            folders={'anonimizados': Path('salida'), 'providencias': Path('providencias')})
+        with patch('app.validar_carpetas'), patch('app.messagebox.showerror') as error, patch('app.threading.Thread') as thread:
             App.run(app)
             self.assertIn('archivo que desea restaurar', error.call_args.args[1])
             thread.assert_not_called()
@@ -220,11 +221,11 @@ class FieldRestorationTests(unittest.TestCase):
             original = target.read_bytes()
             plan = analyze_field_restoration(target, recovery)
             self.assertEqual(len(plan.findings), 2)
-            result = apply_review(plan, {next(iter(plan.findings))}, root / 'salida')
+            result = apply_review(plan, set(plan.findings), root / 'salida')
             with pymupdf.open(result['output']) as doc:
                 text = doc[0].get_text()
-                self.assertEqual(text.count('ANON_DATO_0001'), 1)
-                self.assertEqual(text.count('Maria Perez'), 1)
+                self.assertEqual(text.count('ANON_DATO_0001'), 0)
+                self.assertEqual(text.count('Maria Perez'), 2)
                 self.assertIn('AMPARAR LOS DERECHOS', text)
                 self.assertIn('(', text)
                 self.assertIn(').', text)
