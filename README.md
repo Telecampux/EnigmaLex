@@ -1,4 +1,6 @@
-# Anonimizador reversible local
+# EnigmaLex · Protección de datos personales
+
+Anonimización de documentos con revisión del sustanciador.
 
 ## Instalador de Windows
 

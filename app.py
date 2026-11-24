@@ -69,7 +69,7 @@ class App(tk.Tk):
         super().__init__()
         configurar_estilos(self)
         configurar_casillas(self)
-        self.title(f'Anonimizador · Revisión y autorización · {installed_version(Path(__file__).resolve().parent)}')
+        self.title(f'EnigmaLex · Protección de datos personales · {installed_version(Path(__file__).resolve().parent)}')
         icon = Path(__file__).resolve().parent / 'assets' / 'anonimizador.ico'
         if icon.is_file():
             self.iconbitmap(str(icon))
@@ -100,7 +100,9 @@ class App(tk.Tk):
         compact = self.winfo_screenheight() < 800
         frame = ttk.Frame(self, padding=12 if compact else 22)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='EnigmaLex - Anonimizador reversible', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='EnigmaLex · Protección de datos personales', font=('Segoe UI', 22, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='Anonimización de documentos con revisión del sustanciador',
+                  font=('Segoe UI', 11)).pack(anchor='w', pady=(2, 0))
         ttk.Label(frame, text=f'Versión instalada: {installed_version(Path(__file__).resolve().parent)}').pack(anchor='w')
         ttk.Label(frame, text='OCR local en español e inglés · Originales intactos · Restauración de archivos anonimizados').pack(anchor='w', pady=(3, 15))
         modes = ttk.Frame(frame)
