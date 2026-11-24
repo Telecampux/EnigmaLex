@@ -171,11 +171,11 @@ class App(tk.Tk):
         ttk.Label(self.manual_frame, text='Otros datos o variables que desea anonimizar (uno por línea):').pack(anchor='w', pady=(14, 4))
         self.manual = tk.Text(self.manual_frame, height=2 if compact else 5, wrap='word', font=('Segoe UI', 10))
         self.manual.pack(fill='x')
-        ttk.Label(self.manual_frame, text='Metadatos, Nombres, Identificaciones y correos electrónicos',
+        ttk.Label(self.manual_frame, text='Datos personales e identificadores del caso',
                   font=('Segoe UI', 11, 'bold')).pack(anchor='w', pady=(8, 2))
-        ttk.Checkbutton(self.manual_frame, text='Detectar automáticamente metadatos, nombres, identificaciones y correos electrónicos',
+        ttk.Checkbutton(self.manual_frame, text='Detectar automáticamente datos personales e identificadores del caso',
                         variable=self.auto, command=self.actualizar_aviso_deteccion).pack(anchor='w', pady=6)
-        ttk.Label(self.manual_frame, text='Metadatos: puede seleccionar su limpieza en la ventana de revisión (autor, fechas internas y datos de cámara).',
+        ttk.Label(self.manual_frame, text='Propone nombres, documentos, correos, teléfonos, direcciones, IP, fechas de nacimiento y radicados. También propone limpiar metadatos (autor, fechas internas y datos de cámara). El sustanciador revisa cada hallazgo y decide cuáles ocultar.',
                   wraplength=790).pack(anchor='w')
         self.aviso_deteccion = tk.StringVar()
         ttk.Label(self.manual_frame, textvariable=self.aviso_deteccion, foreground='#9a3412',
@@ -223,9 +223,9 @@ class App(tk.Tk):
         if self.auto.get():
             self.aviso_deteccion.set('')
         elif self.manual.get('1.0', 'end').strip():
-            self.aviso_deteccion.set('Al desactivar esta opción, los metadatos y los demás datos no quedan marcados automáticamente. Puede seleccionar metadatos en la revisión y se aplicarán los datos que haya incluido manualmente arriba.')
+            self.aviso_deteccion.set('La detección automática de campos está desactivada. Se propondrán solo los datos escritos arriba. La limpieza de metadatos se decide por separado en la revisión.')
         else:
-            self.aviso_deteccion.set('Al desactivar esta opción, los metadatos y los demás datos no quedan marcados automáticamente. Puede seleccionar metadatos en la revisión o incluir datos manualmente arriba.')
+            self.aviso_deteccion.set('La detección automática de campos está desactivada. Puede añadir datos arriba. La limpieza de metadatos se decide por separado en la revisión.')
 
     def update_result_controls(self, *_):
         selected = self.selected_restored.get()
