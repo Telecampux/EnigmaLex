@@ -32,6 +32,9 @@ NON_PERSON_WORDS = frozenset({
     'JUEZ', 'JUEZA', 'CONSTITUCIONAL', 'MUNICIPAL',
     'EPS', 'IPS', 'SAS', 'LTDA', 'MINISTERIO', 'SECRETARÍA', 'SECRETARIA',
     'JUZGADO', 'CORTE', 'TRIBUNAL', 'HOSPITAL', 'CLÍNICA', 'CLINICA',
+    'FISCALÍA', 'FISCALIA', 'PROCURADURÍA', 'PROCURADURIA',
+    'DEFENSORÍA', 'DEFENSORIA', 'CONTRALORÍA', 'CONTRALORIA',
+    'POLICÍA', 'POLICIA', 'NACIÓN', 'NACION',
     'UNIVERSIDAD', 'EMPRESA', 'SOCIEDAD', 'ALCALDÍA', 'ALCALDIA',
     'GOBERNACIÓN', 'GOBERNACION', 'SUPERINTENDENCIA', 'ENTIDAD',
     'IDENTIFICACIÓN', 'IDENTIFICACION', 'NACIMIENTO', 'DIAGNÓSTICO', 'DIAGNOSTICO',
@@ -44,6 +47,11 @@ ID_NUMBER = (
     r'(\d(?:[.\- \t\u00a0\u202f]*\d){4,14})(?![\w/]|[.\- \t\u00a0\u202f]*\d)'
 )
 PATTERNS = {
+    'TELEFONO': re.compile(r'(?i)\b(?:tel[eé]fono|celular|m[oó]vil|contacto\s+telef[oó]nico|whatsapp)\s*(?:n[uú]mero|n[.º°o]+)?\s*[:.#-]?\s*(\+?\d(?:[\s().-]*\d){6,14})(?!\d)'),
+    'DIRECCION': re.compile(r'(?i)\b(?:direcci[oó]n(?:\s+de\s+(?:residencia|domicilio|notificaci[oó]n))?|domicilio|residencia)\s*[:#-]\s*([^\n;,]{5,100})'),
+    'IP': re.compile(r'(?i)\b(?:direcci[oó]n\s+ip|ip)\s*[:#-]?\s*((?:\d{1,3}\.){3}\d{1,3})(?!\d)'),
+    'FECHA_NACIMIENTO': re.compile(r'(?i)\b(?:fecha\s+de\s+nacimiento|naci[oó]\s+el)\s*[:#-]?\s*(\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b'),
+    'RADICADO': re.compile(r'(?i)\b(?:radicado|radicaci[oó]n|n[uú]mero\s+de\s+proceso|expediente)\s*(?:n[uú]mero|n[.º°o]+)?\s*[:#-]?\s*(\d[\d\s.-]{8,35}\d)(?!\d)'),
     'CORREO': re.compile(
         r'(?i)(?<![\w@])[A-Z0-9](?:[A-Z0-9._%+-]*[A-Z0-9])?[ \t]*@[ \t]*'
         r'(?:[A-Z0-9](?:[A-Z0-9-]*[A-Z0-9])?[ \t]*\.[ \t]*)+'
@@ -128,7 +136,7 @@ class Replacer:
                         continue
                     if kind in PERSON_KINDS:
                         self.discovered_entities['PERSONA'].add(m.group(group))
-                    elif kind != 'CORREO':
+                    elif kind in {'DOCUMENTO', 'IDENTIFICACION'}:
                         self.discovered_entities['IDENTIFICACION'].add(m.group(group))
                     candidates.append((m.start(group), m.end(group), kind, m.group(group)))
             candidates.extend(known_entity_spans(text, self.known_entities))

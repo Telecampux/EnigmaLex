@@ -9,7 +9,10 @@ from estilo import configurar_estilos
 
 DATOS_PERSONALES_AUTOMATICOS = frozenset({
     'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL', 'DOCUMENTO', 'IDENTIFICACION', 'CORREO', 'DATO',
+    'TELEFONO', 'DIRECCION', 'IP', 'FECHA_NACIMIENTO', 'RADICADO',
 })
+IDENTIFICADORES_DIRECTOS = frozenset({'PERSONA', 'NOMBRE_FORMULARIO', 'PROFESIONAL',
+                                      'DOCUMENTO', 'IDENTIFICACION', 'CORREO', 'TELEFONO', 'DIRECCION', 'IP'})
 
 
 def draw_redaction(draw, box):
@@ -34,7 +37,7 @@ class ReviewWindow(tk.Toplevel):
         self.plans, self.on_approve = plans, on_approve
         self.rows, self.chosen = {}, set()
         self.metadata_rows = set()
-        self.clean_metadata = tk.BooleanVar(value=all(getattr(plan, 'automatic', True) for plan in plans))
+        self.clean_metadata = tk.BooleanVar(value=not self.restoring)
         self.row_locations = {}
         self.photo = None
         self.current = None
@@ -43,9 +46,9 @@ class ReviewWindow(tk.Toplevel):
         self.protocol('WM_DELETE_WINDOW', self.cancel)
         frame = ttk.Frame(self, padding=15)
         frame.pack(fill='both', expand=True)
-        ttk.Label(frame, text='Revisa los datos que se cargarán al fallo' if self.restoring else 'Metadatos, Nombres, Identificaciones y correos electrónicos', font=('Segoe UI', 19, 'bold')).pack(anchor='w')
+        ttk.Label(frame, text='Revisa los datos que se cargarán al fallo' if self.restoring else 'Revisión de datos antes de compartir con IA externa', font=('Segoe UI', 19, 'bold')).pack(anchor='w')
         instruction = ('Todavía no se ha guardado ningún resultado. Marca cada dato que autorizas restaurar.' if self.restoring else
-                       'Se muestran primero los metadatos encontrados; puede elegir si los anonimiza. Después se proponen nombres, identificaciones y correos electrónicos, que puede desmarcar antes de generar.')
+                       'El sustanciador decide qué propuestas excluir de la anonimización. Rojo: identificadores directos de protección prioritaria. Ámbar: datos contextuales que también pueden identificar. Revise cada página y los metadatos antes de cargar el archivo a la IA.')
         ttk.Label(frame, text=instruction, wraplength=1050).pack(anchor='w', pady=5)
         if not self.restoring:
             ttk.Checkbutton(frame, text='Anonimizar metadatos', variable=self.clean_metadata).pack(anchor='w', pady=(5, 2))
@@ -78,6 +81,8 @@ class ReviewWindow(tk.Toplevel):
         self.table = ttk.Treeview(table_frame, columns=('allow', 'kind', 'value', 'where'), show='headings', height=6)
         self.table.tag_configure('autorizado', background='#e4f2e8', foreground='#164526')
         self.table.tag_configure('metadato', background='#dbeafe', foreground='#1e3a8a')
+        self.table.tag_configure('directo', background='#fce4e4', foreground='#8a1f1f')
+        self.table.tag_configure('contextual', background='#fff0c2', foreground='#704b00')
         for key, text, width in [('allow', 'Autorizar', 70), ('kind', 'Tipo', 110), ('value', 'Dato que se ocultará', 300), ('where', 'Archivo / ubicación', 450)]:
             if key == 'value' and self.restoring:
                 text = 'Código que se restaurará'
@@ -111,7 +116,7 @@ class ReviewWindow(tk.Toplevel):
             for location, evidence in plan.evidence.items():
                 if evidence.get('image'):
                     self.add_row(index, None, 'REVISAR PÁGINA',
-                                 'Revise nombre, cédula, radicado, TD, NUI, patio y huella', location)
+                                 'Revise nombre, cédula, teléfono, dirección, radicado, TD, NUI, patio, huella, salud y contexto identificable', location)
         if not self.restoring:
             for row, (index, identity) in self.rows.items():
                 finding = plans[index].findings.get(identity, {})
@@ -218,7 +223,9 @@ class ReviewWindow(tk.Toplevel):
         else:
             self.chosen.add(row)
         self.table.set(row, 'allow', '☑' if row in self.chosen else '☐')
-        self.table.item(row, tags=('autorizado',) if row in self.chosen else ())
+        kind = self.table.set(row, 'kind')
+        category = 'directo' if kind in IDENTIFICADORES_DIRECTOS else 'contextual'
+        self.table.item(row, tags=(category,))
         self.update_counter()
         if redraw:
             self.draw_image()

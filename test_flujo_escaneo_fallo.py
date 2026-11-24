@@ -16,6 +16,18 @@ from ocr_local import redact
 from restauracion_campos import restore_judgment
 
 
+class OrganizationNameTests(unittest.TestCase):
+    def test_public_entity_is_not_proposed_as_person(self):
+        replacer = Replacer(reviewing=True)
+        list(replacer.spans('Accionante: Fiscalía General de la Nación'))
+        self.assertFalse(replacer.findings)
+
+        person = Replacer(reviewing=True)
+        list(person.spans('Demandante: María Fernanda López'))
+        self.assertEqual([item['value'] for item in person.findings.values()],
+                         ['María Fernanda López'])
+
+
 class ScannedJudgmentFlowTests(unittest.TestCase):
     def test_colombian_id_number_labels_and_repeated_values_are_removed_from_pdf(self):
         with tempfile.TemporaryDirectory() as directory:
