@@ -1,6 +1,6 @@
 #define AppName "EnigmaLex"
 #ifndef AppVersion
-  #define AppVersion "2026.11.24.3"
+  #define AppVersion "2026.11.28.1"
 #endif
 
 [Setup]
