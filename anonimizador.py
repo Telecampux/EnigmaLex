@@ -752,6 +752,7 @@ def _propose_manuscript_identity_blocks(replacer):
     """Propose narrow value boxes, preserving the surrounding petition text."""
     from PIL import Image
     from entidades import edit_distance, normalized_word
+    from ocr_local import _unread_ink
 
     labels = {'accionante', 'nombre', 'radicado', 'cedula', 'ciudadania',
               'identificado', 'identificada', 'nui', 'patio', 'huella', 'yo', 'td', 'cc'}
@@ -770,8 +771,10 @@ def _propose_manuscript_identity_blocks(replacer):
         if (evidence.get('native_word_count', 0) >= 3 and
                 evidence.get('ocr_word_count', 0) <= 2):
             continue
-        with Image.open(io.BytesIO(evidence['image'])) as image:
+        with Image.open(io.BytesIO(evidence['image'])) as source:
+            image = source.convert('RGB')
             width, height = image.size
+        printed = [box for _, _, box, confidence in evidence['words'] if confidence >= 72]
         text = evidence['text']
         first_pass_end = text.lower().find('powered by')
         if first_pass_end < 0:
@@ -799,7 +802,9 @@ def _propose_manuscript_identity_blocks(replacer):
                    max(0, min(box[1] for _, box in selected)-margin_y),
                    min(width, max(box[2] for _, box in selected)+margin_x),
                    min(height, max(box[3] for _, box in selected)+margin_y))
-            _add_manuscript_zone(replacer, location, box, kind)
+            ink_box = _unread_ink(image, box, printed)
+            if ink_box:
+                _add_manuscript_zone(replacer, location, ink_box, kind)
 
         for index, row in enumerate(rows):
             row_words = row['words']
@@ -854,7 +859,9 @@ def _propose_manuscript_identity_blocks(replacer):
                            if sum(char.isdigit() for char in word) >= 2], 'Número manuscrito')
             print_box = (round(width*.73), max(0, round(top+height*.025)),
                          round(width*.88), min(height, round(bottom+height*.02)))
-            _add_manuscript_zone(replacer, location, print_box, 'Huella digital')
+            ink_box = _unread_ink(image, print_box, printed)
+            if ink_box:
+                _add_manuscript_zone(replacer, location, ink_box, 'Huella digital')
 
 
 def _add_manuscript_zone(replacer, location, box, value):

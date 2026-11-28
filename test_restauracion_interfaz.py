@@ -47,12 +47,12 @@ class RestorationInterfaceTests(unittest.TestCase):
                 self.app.download_restored()
             self.assertEqual(destination.read_bytes(), target.read_bytes())
 
-    def test_picker_starts_in_downloads_and_does_not_hide_extensions(self):
+    def test_picker_starts_in_configured_folder_and_does_not_hide_extensions(self):
+        self.app.folders['providencias'] = Path('C:/carpeta-elegida')
         with patch('app.filedialog.askopenfilename', return_value='') as dialog:
             self.app.load_downloaded_judgment()
-        expected = Path.home() / 'Downloads'
         self.assertEqual(dialog.call_args.kwargs['initialdir'],
-                         str(expected if expected.is_dir() else Path.home()))
+                         str(self.app.folders['providencias']))
         self.assertEqual(dialog.call_args.kwargs['filetypes'][-1], ('Todos los archivos', '*'))
 
     def test_selecting_anonymized_document_shows_both_paths_and_table(self):

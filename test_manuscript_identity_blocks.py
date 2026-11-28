@@ -1,14 +1,14 @@
-import io
+﻿import io
 import unittest
 from types import SimpleNamespace
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from anonimizador import _propose_manuscript_identity_blocks
 
 
 class ManuscriptIdentityBlocksTests(unittest.TestCase):
-    def test_different_page_layouts_get_content_based_zones(self):
+    def test_printed_labels_without_unread_ink_do_not_create_zones(self):
         image = Image.new('RGB', (1000, 1400), 'white')
         buffer = io.BytesIO()
         image.save(buffer, 'PNG')
@@ -28,9 +28,20 @@ class ManuscriptIdentityBlocksTests(unittest.TestCase):
                 'scanned': True, 'image': buffer.getvalue(), 'text': text, 'words': spans}}, findings={})
             _propose_manuscript_identity_blocks(replacer)
             values = [finding['value'] for finding in replacer.findings.values()]
-            self.assertIn('Nombre manuscrito', values)
-            self.assertTrue(any('radicado' in value for value in values))
-            self.assertIn('Huella digital', values)
+            self.assertEqual([], values)
+
+    def test_unread_ink_next_to_label_creates_zone(self):
+        image = Image.new('RGB', (1000, 1400), 'white')
+        ImageDraw.Draw(image).line([(280, 260), (300, 270), (325, 258), (350, 270)], fill='black', width=3)
+        buffer = io.BytesIO()
+        image.save(buffer, 'PNG')
+        text = 'Nombre Persona\nPowered by'
+        words = [(0, 6, (90, 250, 240, 280), 90),
+                 (7, 14, (270, 250, 420, 280), 50)]
+        replacer = SimpleNamespace(evidence={'Documento / Página 1': {
+            'scanned': True, 'image': buffer.getvalue(), 'text': text, 'words': words}}, findings={})
+        _propose_manuscript_identity_blocks(replacer)
+        self.assertIn('Nombre manuscrito', [finding['value'] for finding in replacer.findings.values()])
 
 
 if __name__ == '__main__':

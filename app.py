@@ -86,6 +86,7 @@ class App(tk.Tk):
         self.active_filename = ''
         self.restored_file = ''
         self.folders = cargar_carpetas()
+        self.after_idle(self.validar_carpetas_iniciales)
         self.selected_restored = tk.StringVar()
         self.output = tk.StringVar(value=str(self.folders['anonimizados']))
         self.auto = tk.BooleanVar(value=True)
@@ -458,11 +459,18 @@ class App(tk.Tk):
             self.load_downloaded_judgment()
             return
         originals = self.folders['originales']
+        if not originals.is_dir():
+            messagebox.showerror('Carpeta de originales',
+                                 f'La carpeta configurada para los originales no existe o no está conectada:\n{originals}\n\nSeleccione una carpeta disponible en «Configurar carpetas…».',
+                                 parent=self)
+            return
         files = filedialog.askopenfilenames(
             parent=self,
             title='Abra la carpeta y seleccione los archivos originales para anonimizar',
-            initialdir=str(originals if originals.is_dir() else Path.home()),
+            initialdir=str(originals),
             filetypes=[('Todos los archivos', '*')])
+        if files:
+            self.clear()
         for file in files:
             if Path(file).suffix.lower() == '.zip':
                 self.choose_archive_members(Path(file))
@@ -566,8 +574,7 @@ class App(tk.Tk):
         path = filedialog.askopenfilename(
             title='Seleccione el archivo anonimizado original' if original else
                   'Seleccione el documento anonimizado elaborado por el sustanciador',
-            initialdir=str(self.folders['anonimizados'] if original else
-                           (Path.home() / 'Downloads' if (Path.home() / 'Downloads').is_dir() else self.folders['providencias'])),
+            initialdir=str(self.folders['anonimizados'] if original else self.folders['providencias']),
             filetypes=[('Todos los archivos', '*')] if original else
                       [('Providencias PDF, Word y texto', '*.pdf *.docx *.txt *.md *.log *.rst'),
                        ('Todos los archivos', '*')])
@@ -651,6 +658,18 @@ class App(tk.Tk):
             self.recovery_fields.insert('', 'end', values=(code, value))
         self.recovery_info.set(f"Insumo de origen: {body['name']} · {len(body['fields'])} campos guardados.")
         self.status.set('Archivo listo para restaurar.')
+
+    def validar_carpetas_iniciales(self):
+        faltantes = [(key, path) for key, path in self.folders.items() if not path.is_dir()]
+        if faltantes:
+            detalle = '\n'.join(f'• {key}: {path}' for key, path in faltantes)
+            messagebox.showwarning(
+                'Carpetas no disponibles',
+                f'Las siguientes carpetas configuradas no existen o no están conectadas:\n\n{detalle}\n\n'
+                'Seleccione carpetas disponibles en «Configurar carpetas…».',
+                parent=self,
+            )
+            self.configurar_carpetas()
 
     def configurar_carpetas(self):
         if self.busy:
@@ -805,11 +824,13 @@ class App(tk.Tk):
 
     def _save_work(self, selections, output):
         success = 0
+        saved_outputs = []
         for plan, ids in selections:
             check_cancelled()
             self.events.put(('file', plan.path.name))
             try:
                 result = apply_review(plan, ids, output, self.report_progress)
+                saved_outputs.append(result['output'])
                 zones = sum(plan.findings[identity]['kind'] == 'ZONA' for identity in ids if identity in plan.findings)
                 self.events.put(('log', f'Guardado: {result["output"]}\n'
                                          f'Zonas de firma aplicadas: {zones}'))
@@ -821,7 +842,16 @@ class App(tk.Tk):
                 message = f'{plan.path.name}: ERROR — {exc}'
             if message:
                 self.events.put(('log', message))
-        self.events.put(('done', 'Proceso terminado' if success == len(selections) else 'Revise los errores.'))
+        status = 'Proceso terminado' if success == len(selections) else 'Revise los errores.'
+        self.events.put(('anonymized', (status, saved_outputs)) if success else ('done', status))
+
+    def activar_pantalla_anonimizar(self):
+        self.mode.set('anonimizar')
+        self.deiconify()
+        self.attributes('-topmost', True)
+        self.lift()
+        self.focus_force()
+        self.after(500, lambda: self.attributes('-topmost', False))
 
     def poll(self):
         try:
@@ -862,10 +892,21 @@ class App(tk.Tk):
                 else:
                     self.busy = False
                     self.activity.stop()
+                    saved_outputs = []
+                    if kind == 'anonymized':
+                        message, saved_outputs = message
                     label = ('Restaurar copia exacta del original' if self.restore_kind.get() == 'original' else 'Restaurar documento del sustanciador en local') if self.mode.get() == 'fallo' else 'Anonimizar'
                     self.run_button.config(state='normal', text='Proceso terminado' if message == 'Proceso terminado' else label)
                     self.cancel_button.config(state='disabled')
                     self.status.set(message)
+                    if kind == 'anonymized':
+                        self.deiconify()
+                        self.lift()
+                        detail = '\n'.join(str(path) for path in saved_outputs)
+                        messagebox.showinfo('Anonimización terminada',
+                                            f'Se crearon {len(saved_outputs)} archivo(s) anonimizado(s):\n\n{detail}',
+                                            parent=self)
+                        self.after(50, self.activar_pantalla_anonimizar)
                     if self.restored_file:
                         restored = self.restored_file
                         self.restored_file = ''

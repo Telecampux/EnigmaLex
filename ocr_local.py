@@ -299,6 +299,44 @@ def handwriting_regions(image, text, words):
         if ink.histogram()[255] < max(25, total * .2):
             continue
         regions.append((box, 'tinta azul', _read_handwritten_line(crop)))
+    # A gray handwritten name often follows the printed closing "Atentamente".
+    # Search only that small area; pale marks elsewhere on a scan are too ambiguous.
+    seen_closings = set()
+    for match in re.finditer(r'(?i)\batentamente\b', text):
+        anchors = [box for a, b, box, confidence in words
+                   if a < match.end() and b > match.start() and confidence >= 60]
+        if not anchors:
+            continue
+        x0 = min(box[0] for box in anchors)
+        y0 = min(box[1] for box in anchors)
+        x1 = max(box[2] for box in anchors)
+        y1 = max(box[3] for box in anchors)
+        anchor_key = (x0, y0, x1, y1)
+        if anchor_key in seen_closings:
+            continue
+        seen_closings.add(anchor_key)
+        line_height = max(12, y1 - y0)
+        probe = (max(0, x0 - line_height), min(height, y1 + 2),
+                 min(width, x0 + max(x1 - x0 + 10 * line_height, width // 2)),
+                 min(height, y1 + 5 * line_height))
+        if probe[2] <= probe[0] or probe[3] <= probe[1]:
+            continue
+        crop = image.crop(probe).convert('L')
+        pale = crop.point(lambda value: 255 if 70 <= value <= 225 else 0)
+        mask_draw = ImageDraw.Draw(pale)
+        for _, _, (a, b, c, d), confidence in words:
+            if confidence >= 72:
+                mask_draw.rectangle((a - probe[0] - 5, b - probe[1] - 5,
+                                     c - probe[0] + 5, d - probe[1] + 5), fill=0)
+        bounds = pale.getbbox()
+        if not bounds or pale.histogram()[255] < 100 or bounds[2] - bounds[0] < 2 * line_height:
+            continue
+        box = (max(0, probe[0] + bounds[0] - 6), max(0, probe[1] + bounds[1] - 6),
+               min(width, probe[0] + bounds[2] + 6), min(height, probe[1] + bounds[3] + 6))
+        if any(min(box[2], old[2]) > max(box[0], old[0])
+               and min(box[3], old[3]) > max(box[1], old[1]) for old, _, _ in regions):
+            continue
+        regions.append((box, 'nombre manuscrito tras Atentamente', ''))
     return regions
 
 

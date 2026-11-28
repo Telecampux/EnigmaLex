@@ -9,3 +9,5 @@ dist/
 instalador-dist/
 *.spec
 tessdata/
+/Originales/
+/output/
